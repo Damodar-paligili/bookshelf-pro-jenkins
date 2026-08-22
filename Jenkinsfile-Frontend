@@ -1,0 +1,49 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION      = 'us-east-1'
+        CLUSTER_NAME    = 'bookshelf-eks-cluster'
+        ECR_REPO        = 'bookshelf-frontend'
+        AWS_CREDENTIALS = 'aws-credentials'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Push ECR') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${AWS_CREDENTIALS}"]]) {
+                    sh '''
+                    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    IMAGE_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${BUILD_NUMBER}
+                    
+                    docker build -t $IMAGE_URI ./client
+                    docker push $IMAGE_URI
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Frontend to EKS') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${AWS_CREDENTIALS}"]]) {
+                    sh '''
+                    aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME}
+                    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                    IMAGE_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${BUILD_NUMBER}
+                    
+                    kubectl apply -f kubernetes-files/frontend-deployment.yml
+                    kubectl set image deployment/frontend-deployment frontend=$IMAGE_URI
+                    kubectl rollout status deployment/frontend-deployment --timeout=180s
+                    '''
+                }
+            }
+        }
+    }
+}
